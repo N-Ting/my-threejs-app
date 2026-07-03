@@ -92,7 +92,7 @@ onMounted(() => { // 组件挂载到 DOM 后开始初始化 Three.js
     const raycaster = new THREE.Raycaster(); // 射线检测器，用于判断点击命中哪个 3D 对象
     raycaster.setFromCamera(mouse, camera); // 从相机位置沿鼠标方向发射射线
     const intersects = raycaster
-      .intersectObjects(map.children, true) // 递归检测 map 下所有子对象（含 unit 内 Mesh）
+      .intersectObjects(map.children) // 递归检测 map 下所有子对象（含 unit 内 Mesh）
       .filter((item) => item.object.type !== "Line"); // 过滤边界线，只保留 Mesh / Sprite
 
     if (intersects.length > 0) { // 有命中对象
