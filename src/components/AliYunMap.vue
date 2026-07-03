@@ -114,7 +114,6 @@ onMounted(() => {
         const intersects = raycaster
           .intersectObjects(map.children)
           .filter((item) => item.object.type !== "Line");
-        console.log("🚀 ~ intersects:", intersects)
 
         if (intersects.length > 0) {
           if (intersects[0].object.type === "Mesh") {
