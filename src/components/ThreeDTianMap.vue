@@ -218,10 +218,10 @@ const initScene = async () => {
   mapStyle.guangquan02 = textureLoader.load(
     new URL("../assets/guangquan2.webp", import.meta.url).href,
   ); // 柱底内圈贴图
-  mapStyle.rotationBorder1 = await loadCleanWebpTexture(
+  mapStyle.rotationBorder1 = textureLoader.load(
     new URL("../assets/dibuguangquan1.webp", import.meta.url).href,
   ); // 地图底部大光圈
-  mapStyle.rotationBorder2 = await loadCleanWebpTexture(
+  mapStyle.rotationBorder2 = textureLoader.load(
     new URL("../assets/dibuguangquan2.webp", import.meta.url).href,
   ); // 地图底部小光圈
   mapStyle.pointTexture = textureLoader.load(
@@ -821,6 +821,7 @@ const createGuangzhouBottomLight = () => {
   const plane1 = new THREE.PlaneGeometry(radius1, radius1);
   const material1 = new THREE.MeshBasicMaterial({
     map: mapStyle.rotationBorder1,
+    alphaMap: mapStyle.rotationBorder1,
     color: mapStyle.bottomCircleColor,
     transparent: true,
     opacity: mapStyle.bottomCircleOpacity,
@@ -836,6 +837,7 @@ const createGuangzhouBottomLight = () => {
   const plane2 = new THREE.PlaneGeometry(radius2, radius2);
   const material2 = new THREE.MeshBasicMaterial({
     map: mapStyle.rotationBorder2,
+    alphaMap: mapStyle.rotationBorder2,
     color: mapStyle.bottomCircleColor,
     transparent: true,
     opacity: mapStyle.bottomCircleOpacity,
