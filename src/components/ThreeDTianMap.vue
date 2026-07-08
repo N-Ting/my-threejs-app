@@ -4,10 +4,18 @@
   <!-- 基于天地图做的 3D 地图 + 柱状图 -->
   <div id="map"></div>
   <!-- Three.js 渲染容器，WebGL / CSS3D / CSS2D 层均挂载于此 -->
+  <button
+    v-if="showBackButton"
+    class="back-btn"
+    type="button"
+    @click="handleBack"
+  >
+    返回上一级
+  </button>
 </template>
 
 <script setup>
-import { onMounted } from "vue"; // Vue 组合式 API：组件挂载后执行初始化
+import { onMounted, ref } from "vue"; // Vue 组合式 API
 import * as THREE from "three"; // Three.js 核心库，用于 3D 场景渲染
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js"; // 轨道控制器：拖拽旋转/缩放
 import {
@@ -63,6 +71,17 @@ let clickMesh = []; // 可交互物体集合（勿用 ref，避免 Vue 代理 Th
 let barCircles = []; // 柱底旋转光圈集合
 let mapBottomCircles = []; // 地图底部旋转光圈集合
 let animatedPoints = []; // 需浮动动画的 Sprite 图标集合
+let mapObject = null; // 当前地图 Object3D 引用
+let allDistrictEntries = []; // 各区县数据包：用于下钻显示/隐藏
+let mapDecor = { titleLabel: null, bottomLight: null }; // 底部标题与光圈装饰
+let navigateBack = null; // 返回广州市视图的回调（initScene 内赋值）
+let currentMapLevel = "city"; // 当前层级：city 广州市 / district 区县
+const showBackButton = ref(false); // 是否显示「返回上一级」按钮
+
+/** 点击返回上一级，回到广州市全景 */
+const handleBack = () => {
+  navigateBack?.(); // 调用场景内重建地图方法
+};
 
 /** 根据数据值计算柱体高度 */
 const getBarHeight = (value) => value * 0.015 + 0.15; // 线性映射：值越大柱越高
@@ -228,17 +247,123 @@ const initScene = async () => {
   barCircles = []; // 重置柱底光圈
   mapBottomCircles = []; // 重置地图底部光圈
   animatedPoints = []; // 重置动画图标
-  const map = createMap(guangzhouGeojson, clickMesh); // 构建 3D 地图
-  scene.add(map); // 地图加入场景
+  let hoveredUnit = null; // 当前悬停的区县容器
+
+  /** 切换地图视图：隐藏非当前区县，返回时全部显示 */
+  const switchMapView = (districtName = null) => {
+    const isDistrictView = Boolean(districtName); // 是否区县下钻
+    currentMapLevel = isDistrictView ? "district" : "city"; // 更新层级
+    showBackButton.value = isDistrictView; // 控制返回按钮
+
+    allDistrictEntries.forEach((entry) => {
+      entry.bundle.visible = !isDistrictView || entry.name === districtName; // 隐藏其他区县
+    });
+
+    refreshActiveCollections(districtName); // 刷新交互与动画集合（仅当前可见）
+    focusMapView(districtName); // 重新居中视野
+    updateMapDecor(districtName); // 更新底部标题与光圈位置
+    hoveredUnit = null; // 清空悬停
+    renderer.domElement.style.cursor = "default"; // 恢复光标
+  };
+
+  /** 仅收集当前可见区县的交互对象与动画对象 */
+  const refreshActiveCollections = (districtName = null) => {
+    clickMesh = []; // 重置可点击集合
+    barCircles = []; // 重置柱底光圈动画
+    animatedPoints = []; // 重置图标动画
+    mapBottomCircles = []; // 重置底部光圈动画
+
+    allDistrictEntries.forEach((entry) => {
+      if (districtName && entry.name !== districtName) return; // 跳过隐藏区县
+      entry.clickTargets.forEach((target) => clickMesh.push(target)); // 网格/柱体
+      entry.barRings.forEach((ring) => barCircles.push(ring)); // 柱底光圈
+      entry.sprites.forEach((sprite) => animatedPoints.push(sprite)); // 图标
+    });
+
+    mapDecor.bottomLight?.children.forEach((ring) => {
+      if (ring.isMesh) mapBottomCircles.push(ring); // 底部大光圈始终参与动画
+    });
+  };
+
+  /** 根据当前视图重新居中地图（仅以区县 bundle 计算，不含底部装饰） */
+  const focusMapView = (districtName = null) => {
+    mapObject.rotation.x = -Math.PI / 2; // 保持地图平躺
+    mapObject.position.set(0, 0, 0); // 重置位移
+
+    const box = new THREE.Box3(); // 可见区县包围盒
+    const tempBox = new THREE.Box3(); // 单区县临时包围盒
+
+    allDistrictEntries.forEach((entry) => {
+      if (districtName && entry.name !== districtName) return; // 下钻时仅当前区县
+      tempBox.setFromObject(entry.bundle); // 计算区县包围盒
+      box.union(tempBox); // 合并到总包围盒
+    });
+
+    if (box.isEmpty()) return; // 无有效包围盒则跳过
+
+    const center = box.getCenter(new THREE.Vector3()); // 包围盒中心
+    mapObject.position.x -= center.x; // X 居中
+    mapObject.position.z -= center.z; // Z 居中
+  };
+
+  /** 更新底部标题文案与光圈位置 */
+  const updateMapDecor = (districtName = null) => {
+    const isDistrictView = Boolean(districtName);
+    const titleCn = isDistrictView ? districtName : "广州";
+    const titleEn = isDistrictView
+      ? districtName.replace(/[区县市]/g, "").toUpperCase()
+      : "GUANGZHOU";
+    const bounds = isDistrictView
+      ? allDistrictEntries.find((entry) => entry.name === districtName)?.bounds
+      : getCityBounds(); // 市级用全市包围盒
+
+    if (!bounds) return; // 无包围盒数据则跳过
+
+    if (mapDecor.titleLabel?.element) {
+      const cnNode = mapDecor.titleLabel.element.querySelector(".country-cn");
+      const enNode = mapDecor.titleLabel.element.querySelector(".country-en");
+      if (cnNode) cnNode.textContent = titleCn; // 更新中文标题
+      if (enNode) enNode.textContent = titleEn; // 更新英文标题
+      mapDecor.titleLabel.position.set(
+        bounds.centerX,
+        bounds.minY - bounds.width * 0.12,
+        mapStyle.deep + 0.02,
+      );
+    }
+
+    if (mapDecor.bottomLight && bounds) {
+      const mapSpan = Math.max(bounds.width, bounds.height, 0.1);
+      const radius1 = mapSpan * 1.4;
+      const radius2 = radius1 * (110 / 130);
+      const [bigCirclePlane, smallCirclePlane] = mapDecor.bottomLight.children;
+      if (bigCirclePlane) {
+        bigCirclePlane.position.set(bounds.centerX, bounds.centerY, -0.01);
+        bigCirclePlane.geometry.dispose();
+        bigCirclePlane.geometry = new THREE.PlaneGeometry(radius1, radius1);
+      }
+      if (smallCirclePlane) {
+        smallCirclePlane.position.set(bounds.centerX, bounds.centerY, -0.01);
+        smallCirclePlane.geometry.dispose();
+        smallCirclePlane.geometry = new THREE.PlaneGeometry(radius2, radius2);
+      }
+    }
+  };
+
+  mapObject = createMap(guangzhouGeojson); // 一次性构建全市地图
+  scene.add(mapObject); // 加入场景
+
+  navigateBack = () => switchMapView(null); // 返回广州市：显示全部区县
+  switchMapView(null); // 初始为广州市全景
 
   // ============ 射线检测交互（悬停 + 点击） ============
   const raycaster = new THREE.Raycaster(); // 射线检测器
   const mouse = new THREE.Vector2(); // 鼠标 NDC 坐标
-  let hoveredUnit = null; // 当前悬停的区县容器
 
-  /** 点击区县回调 */
+  /** 点击区县：市级视图下钻到区县，区县视图不处理 */
   const handleRegionClick = (message) => {
-    console.log("点击区县:", message.event_name, message); // 打印点击信息
+    if (currentMapLevel !== "city") return; // 已在区县视图，不再下钻
+    if (message.event_type !== "mesh") return; // 仅点击地图区块下钻
+    switchMapView(message.event_name); // 下钻：仅显示当前区县数据
   };
 
   /** 屏幕坐标转 NDC 并更新射线 */
@@ -310,15 +435,57 @@ const initScene = async () => {
   });
 };
 
-/** 根据 GeoJSON 创建 3D 地图组 */
-const createMap = (data, clickMesh) => {
-  const map = new THREE.Object3D(); // 地图根容器
+/** 根据 GeoJSON 特征计算区县包围范围 */
+const computeDistrictBounds = (feature) => {
+  let minX = Infinity; // 最小 X
+  let maxX = -Infinity; // 最大 X
+  let minY = Infinity; // 最小 Y
+  let maxY = -Infinity; // 最大 Y
+  const { coordinates, type } = feature.geometry; // 几何数据
 
-  const center = data.features[0].properties.centroid; // 投影中心：第一个区县质心
+  const processRing = (ring) => {
+    ring.forEach((item, idx) => {
+      if (idx === 0) return; // 首点与末点重复，跳过
+      const [x, y] = offsetXY(item); // 投影坐标
+      const px = x; // X
+      const py = -y; // Y（与 mesh 一致取反）
+      if (px < minX) minX = px; // 更新最小 X
+      if (px > maxX) maxX = px; // 更新最大 X
+      if (py < minY) minY = py; // 更新最小 Y
+      if (py > maxY) maxY = py; // 更新最大 Y
+    });
+  };
+
+  coordinates.forEach((coordinate) => {
+    if (type === "MultiPolygon") coordinate.forEach((item) => processRing(item)); // 多多边形
+    if (type === "Polygon") processRing(coordinate); // 单多边形
+  });
+
+  return {
+    minX, // 最西侧
+    maxX, // 最东侧
+    minY, // 最南侧
+    maxY, // 最北侧
+    centerX: (minX + maxX) / 2, // 水平中心
+    centerY: (minY + maxY) / 2, // 垂直中心
+    width: maxX - minX, // 区县宽度
+    height: maxY - minY, // 区县高度
+  };
+};
+
+/** 根据 GeoJSON 创建 3D 地图组（全市一次构建，下钻时切换可见性） */
+const createMap = (data) => {
+  const map = new THREE.Object3D(); // 地图根容器
+  allDistrictEntries = []; // 重置区县数据包
+  vertices.length = 0; // 清空顶点缓存
+
+  if (!data.features?.length) return map; // 无数据时返回空地图
+
+  const center = data.features[0].properties.centroid; // 投影中心
   offsetXY.center(center).translate([0, 0]); // 质心映射到 (0,0)
 
   data.features.forEach((feature, index) => {
-    const unit = new THREE.Object3D(); // 单个区县容器
+    const unit = new THREE.Object3D(); // 单个区县 mesh 容器
     const { centroid, center, name, gb } = feature.properties; // 解构区县属性
     const { coordinates, type } = feature.geometry; // 解构几何数据
     const barPoint = centroid || center || [0, 0]; // 柱图/图标定位点
@@ -326,11 +493,28 @@ const createMap = (data, clickMesh) => {
     const value = Math.floor(Math.random() * 60 + 20); // 模拟数据值
     const barHeight = getBarHeight(value); // 计算柱高
     const showBar = index % 2 === 0; // 偶数区县显示柱图，奇数显示图标
+
+    const bundle = new THREE.Group(); // 区县数据包：mesh + 柱图/图标 + 标签
+    bundle.name = name; // 区县名称
+
+    const entry = {
+      name, // 区县名
+      bundle, // 区县组
+      clickTargets: [], // 可点击对象（mesh / 柱体 / 图标）
+      barRings: [], // 柱底光圈（动画用）
+      sprites: [], // 图标精灵（动画用）
+      bounds: computeDistrictBounds(feature), // 区县包围盒
+    };
+
     let marker = null; // 柱图或图标标记
     let districtLabel = null; // 柱顶信息卡片
 
     if (showBar) {
-      marker = createAreaBar({ name, centroid: barPoint, value }, clickMesh); // 创建光柱
+      marker = createAreaBar(
+        { name, centroid: barPoint, value },
+        entry.clickTargets,
+        entry.barRings,
+      ); // 创建光柱
       districtLabel = createDistrictInfoLabel({
         name, // 区县名
         point: labelPoint, // 标签坐标
@@ -339,8 +523,12 @@ const createMap = (data, clickMesh) => {
         index, // 区县索引
       });
     } else {
-      marker = createIcon(barPoint, { name, index }); // 创建图标
-      clickMesh.push(marker); // 图标加入交互集合
+      marker = createIcon(
+        barPoint,
+        { name, index },
+        entry.clickTargets,
+        entry.sprites,
+      ); // 创建图标
     }
 
     coordinates.forEach((coordinate) => {
@@ -356,26 +544,27 @@ const createMap = (data, clickMesh) => {
         mesh.userData.centroid = centroid; // 质心坐标
         mesh.userData.index = index; // 区县索引
         mesh.userData.unit = unit; // 所属区县容器
-        clickMesh.push(mesh); // 加入交互集合
+        entry.clickTargets.push(mesh); // 加入区县交互集合
         const line = createLine(ring); // 创建边界线
         unit.add(mesh, ...line); // mesh + 顶底线加入区县容器
       }
     });
 
-    if (districtLabel) {
-      map.add(unit, marker, districtLabel); // 柱图区县：容器 + 柱图 + 标签
-    } else if (marker) {
-      map.add(unit, marker); // 图标区县：容器 + 图标
-    } else {
-      map.add(unit); // 仅容器（兜底）
-    }
-    setCenter(map); // 旋转并居中地图
+    bundle.add(unit); // mesh 加入区县组
+    if (marker) bundle.add(marker); // 柱图/图标加入区县组
+    if (districtLabel) bundle.add(districtLabel); // 标签加入区县组
+    map.add(bundle); // 区县组加入地图
+    allDistrictEntries.push(entry); // 记录区县数据包
   });
 
-  const cityLabel = createHtml3dLabel(); // 底部城市标题
-  map.add(cityLabel); // 加入地图
-  const bottomLight = createGuangzhouBottomLight(); // 底部双层光圈
-  map.add(bottomLight); // 加入地图
+  setCenter(map); // 全市地图旋转并居中
+
+  mapDecor.titleLabel = createHtml3dLabel("广州", "GUANGZHOU"); // 底部标题
+  map.add(mapDecor.titleLabel); // 加入地图
+
+  mapDecor.bottomLight = createGuangzhouBottomLight(); // 底部双层光圈
+  map.add(mapDecor.bottomLight); // 加入地图
+
   return map; // 返回地图组
 };
 
@@ -527,7 +716,7 @@ const createBarLights = (height, color) => {
 };
 
 /** 创建柱底发光光圈（外圈 + 内圈） */
-const createBarAperture = () => {
+const createBarAperture = (ringStore) => {
   const quanGroup = new THREE.Group(); // 光圈组
 
   const outerMaterial = new THREE.MeshBasicMaterial({
@@ -574,12 +763,12 @@ const createBarAperture = () => {
   innerRing.position.z = 0.003; // 略高于外圈
 
   quanGroup.add(outerRing, innerRing); // 加入光圈组
-  barCircles.push(outerRing, innerRing); // 加入旋转动画集合
+  ringStore.push(outerRing, innerRing); // 加入区县光圈动画集合
   return quanGroup;
 };
 
 /** 创建单个区县光柱 */
-const createAreaBar = (item, clickMesh) => {
+const createAreaBar = (item, clickTargets, barRings) => {
   const barHeight = getBarHeight(item.value); // 柱体高度
   const barData = {
     event_type: "bar", // 类型：柱图
@@ -642,18 +831,18 @@ const createAreaBar = (item, clickMesh) => {
   topCap.renderOrder = 12; // 渲染顺序
 
   const lights = createBarLights(barHeight, mapStyle.barGlowColor); // 交叉发光面
-  const aperture = createBarAperture(); // 柱底光圈
+  const aperture = createBarAperture(barRings); // 柱底光圈
   areaBar.add(outerMesh, coreMesh, topCap, aperture, ...lights); // 组装光柱
 
   const [x, y] = offsetXY(item.centroid); // 质心投影坐标
   areaBar.position.set(x, -y, mapStyle.deep); // 柱底贴在地图顶面
 
-  clickMesh.push(outerMesh); // 外壳参与点击检测
+  clickTargets.push(outerMesh); // 外壳参与点击检测
   return areaBar; // 返回光柱组
 };
 
 /** 在区县质心创建 Sprite 定位图标 */
-const createIcon = (point, meta) => {
+const createIcon = (point, meta, clickTargets, sprites) => {
   const material = new THREE.SpriteMaterial({
     color: mapStyle.iconColors[meta.index % mapStyle.iconColors.length], // 交替颜色
     map: mapStyle.pointTexture, // 图标贴图
@@ -674,7 +863,8 @@ const createIcon = (point, meta) => {
   sprite.userData.index = meta.index; // 索引
   sprite.userData.baseZ = baseZ; // 浮动动画基准 Z
   sprite.userData.baseSize = size; // 呼吸动画基准尺寸
-  animatedPoints.push(sprite); // 加入动画集合
+  clickTargets.push(sprite); // 加入区县交互集合
+  sprites.push(sprite); // 加入区县动画集合
   return sprite;
 };
 
@@ -739,11 +929,38 @@ const getMeshBounds = () => {
   };
 };
 
-/** 创建底部城市 CSS3D 标题（广州 / GUANGZHOU） */
-const createHtml3dLabel = () => {
+/** 根据全部区县包围盒计算市级范围 */
+const getCityBounds = () => {
+  let minX = Infinity; // 最小 X
+  let maxX = -Infinity; // 最大 X
+  let minY = Infinity; // 最小 Y
+  let maxY = -Infinity; // 最大 Y
+
+  allDistrictEntries.forEach((entry) => {
+    const { bounds } = entry; // 区县包围盒
+    if (bounds.minX < minX) minX = bounds.minX; // 更新最小 X
+    if (bounds.maxX > maxX) maxX = bounds.maxX; // 更新最大 X
+    if (bounds.minY < minY) minY = bounds.minY; // 更新最小 Y
+    if (bounds.maxY > maxY) maxY = bounds.maxY; // 更新最大 Y
+  });
+
+  return {
+    minX, // 最西侧
+    maxX, // 最东侧
+    minY, // 最南侧
+    maxY, // 最北侧
+    centerX: (minX + maxX) / 2, // 水平中心
+    centerY: (minY + maxY) / 2, // 垂直中心
+    width: maxX - minX, // 全市宽度
+    height: maxY - minY, // 全市高度
+  };
+};
+
+/** 创建底部 CSS3D 标题（广州市或区县名） */
+const createHtml3dLabel = (titleCn = "广州", titleEn = "GUANGZHOU") => {
   const content = `
-    <div class="country-cn">广州</div>
-    <div class="country-en">GUANGZHOU</div>
+    <div class="country-cn">${titleCn}</div>
+    <div class="country-en">${titleEn}</div>
   `;
   const tag = document.createElement("div"); // HTML 容器
   tag.innerHTML = content; // 注入标题 HTML
@@ -806,9 +1023,8 @@ const createGuangzhouBottomLight = () => {
   smallCirclePlane.position.set(bounds.centerX, bounds.centerY, -0.01); // 与大圈同位置
   smallCirclePlane.renderOrder = 2; // 渲染顺序
 
-  mapBottomCircles.push(bigCirclePlane, smallCirclePlane); // 加入旋转动画
   group.add(bigCirclePlane, smallCirclePlane); // 加入光圈组
-  return group; // 返回光圈组
+  return group; // 返回光圈组（动画集合由 refreshActiveCollections 维护）
 };
 </script>
 
@@ -820,6 +1036,25 @@ const createGuangzhouBottomLight = () => {
   position: relative; /* 子元素绝对定位参考 */
   overflow: hidden; /* 隐藏溢出 */
   background-color: #010826; /* 深蓝背景色 */
+}
+
+.back-btn {
+  position: absolute; /* 浮在地图左上角 */
+  top: 20px;
+  left: 20px;
+  z-index: 10; /* 高于 canvas 层 */
+  padding: 8px 18px;
+  border: 1px solid rgba(95, 213, 225, 0.55);
+  border-radius: 20px;
+  background: rgba(16, 24, 38, 0.88);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.2s ease;
+
+  &:hover {
+    background: rgba(42, 168, 172, 0.35); /* 悬停高亮 */
+  }
 }
 
 /* :deep 穿透 scoped，作用于动态创建的 CSS3D DOM */
